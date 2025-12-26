@@ -1,0 +1,178 @@
+import argparse
+import json
+import os
+import base64
+import getpass
+import sys
+
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+
+VAULT_FILE = "vault.json"
+ITERATIONS = 480000
+
+
+# ---------------- CRYPTO ----------------
+
+def derive_key(master_password: str, salt: bytes) -> bytes:
+    kdf = PBKDF2HMAC(
+        algorithm=hashes.SHA256(),
+        length=32,           # AES-256
+        salt=salt,
+        iterations=ITERATIONS,
+    )
+    return kdf.derive(master_password.encode())
+
+
+def encrypt_entry(key: bytes, data: dict) -> dict:
+    aes = AESGCM(key)
+    nonce = os.urandom(12)
+    plaintext = json.dumps(data).encode()
+    ciphertext = aes.encrypt(nonce, plaintext, None)
+
+    return {
+        "nonce": base64.b64encode(nonce).decode(),
+        "ciphertext": base64.b64encode(ciphertext).decode()
+    }
+
+
+def decrypt_entry(key: bytes, enc: dict) -> dict:
+    aes = AESGCM(key)
+    nonce = base64.b64decode(enc["nonce"])
+    ciphertext = base64.b64decode(enc["ciphertext"])
+    plaintext = aes.decrypt(nonce, ciphertext, None)
+    return json.loads(plaintext.decode())
+
+
+# ---------------- VAULT ----------------
+
+def load_vault(master_password: str):
+    if not os.path.exists(VAULT_FILE):
+        print("❌ Vault not found. Add an entry first.")
+        sys.exit(1)
+
+    with open(VAULT_FILE, "r") as f:
+        vault = json.load(f)
+
+    salt = base64.b64decode(vault["salt"])
+    key = derive_key(master_password, salt)
+
+    # verify password
+    try:
+        if vault["entries"]:
+            sample = next(iter(vault["entries"].values()))
+            decrypt_entry(key, sample)
+    except Exception:
+        print("❌ Wrong master password.")
+        sys.exit(1)
+
+    return vault, key
+
+
+def save_vault(vault: dict):
+    tmp = VAULT_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(vault, f, indent=2)
+    os.replace(tmp, VAULT_FILE)
+
+
+# ---------------- COMMANDS ----------------
+
+def add_entry(_):
+    master = getpass.getpass("Master Password: ")
+
+    if os.path.exists(VAULT_FILE):
+        with open(VAULT_FILE, "r") as f:
+            vault = json.load(f)
+        salt = base64.b64decode(vault["salt"])
+        key = derive_key(master, salt)
+    else:
+        salt = os.urandom(16)
+        key = derive_key(master, salt)
+        vault = {
+            "salt": base64.b64encode(salt).decode(),
+            "entries": {}
+        }
+
+    website = input("Website: ").strip()
+    username = input("Username: ").strip()
+    password = getpass.getpass("Password: ")
+
+    vault["entries"][website] = encrypt_entry(
+        key, {"username": username, "password": password}
+    )
+
+    save_vault(vault)
+    print("✅ Entry added.")
+
+
+def get_entry(args):
+    master = getpass.getpass("Master Password: ")
+    vault, key = load_vault(master)
+
+    if args.website not in vault["entries"]:
+        print("❌ Entry not found.")
+        return
+
+    data = decrypt_entry(key, vault["entries"][args.website])
+    print(f"\nWebsite : {args.website}")
+    print(f"Username: {data['username']}")
+    print(f"Password: {data['password']}")
+
+
+def list_entries(_):
+    master = getpass.getpass("Master Password: ")
+    vault, _ = load_vault(master)
+
+    if not vault["entries"]:
+        print("Vault is empty.")
+        return
+
+    print("\nStored websites:")
+    for site in vault["entries"]:
+        print("-", site)
+
+
+def delete_entry(args):
+    master = getpass.getpass("Master Password: ")
+    vault, _ = load_vault(master)
+
+    if args.website not in vault["entries"]:
+        print("❌ Entry not found.")
+        return
+
+    del vault["entries"][args.website]
+    save_vault(vault)
+    print("🗑️ Entry deleted.")
+
+
+# ---------------- CLI ----------------
+
+def main():
+    parser = argparse.ArgumentParser(description="CLI Password Manager")
+    sub = parser.add_subparsers(dest="command")
+
+    sub.add_parser("add").set_defaults(func=add_entry)
+
+    g = sub.add_parser("get")
+    g.add_argument("website")
+    g.set_defaults(func=get_entry)
+
+    sub.add_parser("list").set_defaults(func=list_entries)
+
+    d = sub.add_parser("delete")
+    d.add_argument("website")
+    d.set_defaults(func=delete_entry)
+
+    args = parser.parse_args()
+    if not args.command:
+        parser.print_help()
+        return
+
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()
