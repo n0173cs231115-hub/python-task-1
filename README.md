@@ -55,7 +55,9 @@ If a file with the same name already exists in the category folder, the script w
 - The script avoids moving symlinks and directories, and skips hidden files unless `--include-hidden` is set.
 
 
-#python-task-2
+**#python-task-2**
+
+
 🔐 CLI Password Manager (Python)
 📌 Project Overview
 
